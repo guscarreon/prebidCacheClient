@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
@@ -11,11 +12,14 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/context/ctxhttp"
 )
 
 const URL = "someUrl"
 const QPS = 300
-const TEST_TIME_SECONDS = 1
+const TEST_TIME_SECONDS = 60 * 20
+const LOG_SUCCESS = false
+const LOG_ERROR = false
 
 func main() {
 	// init logrus
@@ -45,8 +49,9 @@ func main() {
 func run(input []string) {
 
 	var counter int = 0
+	var errCounter int = 0
 	var waitGroup sync.WaitGroup
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	done := make(chan bool)
 
 	go func() {
@@ -57,16 +62,67 @@ func run(input []string) {
 			case <-ticker.C:
 				waitGroup.Add(QPS)
 				for i := 0; i < QPS; i++ {
-					go aParallelCall(input[9], &waitGroup, &counter)
+					go aParallelCall(input[9], &waitGroup, &counter, &errCounter)
 				}
 				waitGroup.Wait()
 			}
 		}
 	}()
-	time.Sleep(1 * time.Second)
+	time.Sleep(time.Second)
 	ticker.Stop()
 	done <- true
-	logrus.Infof("QPS = %d", counter)
+	logrus.Infof("QPS = %d; Errors = %d", counter, errCounter)
+}
+
+func aParallelCall(reqBody string, wg *sync.WaitGroup, counter *int, errCounter *int) {
+	wasError := aCall(reqBody, URL)
+	if wasError {
+		*errCounter = *errCounter + 1
+	}
+	*counter = *counter + 1
+	wg.Done()
+}
+
+func aCall(reqBody, url string) bool {
+	wasError := false
+
+	httpClientPtr, httpRequest, err := buildClientAndRequest(reqBody, url)
+	if nil != err {
+		if LOG_ERROR {
+			logrus.Errorf("%v", err)
+		}
+		wasError = true
+		return wasError
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	resp, err := ctxhttp.Do(ctx, httpClientPtr, httpRequest)
+	if nil != err {
+		if LOG_ERROR {
+			logrus.Errorf("client.Do() call error: %v", err)
+		}
+		wasError = true
+		return wasError
+	}
+	defer resp.Body.Close()
+
+	// Check status
+	if resp.StatusCode != http.StatusOK {
+		if LOG_ERROR {
+			logrus.Errorf("Response status code = %d", resp.StatusCode)
+		}
+		wasError = true
+		return wasError
+	}
+
+	// Print response
+	if LOG_SUCCESS {
+		logSuccess(resp, reqBody)
+	}
+
+	return wasError
 }
 
 func buildClientAndRequest(reqBody, url string) (*http.Client, *http.Request, error) {
@@ -87,42 +143,11 @@ func buildClientAndRequest(reqBody, url string) (*http.Client, *http.Request, er
 	return &httpClient, httpRequest, nil
 }
 
-func aCall(reqBody, url string) {
-
-	httpClientPtr, httpRequest, err := buildClientAndRequest(reqBody, url)
-	if nil != err {
-		return
-	}
-
-	client := *httpClientPtr
-	resp, err := client.Do(httpRequest)
-	if nil != err {
-		return
-	}
-	defer resp.Body.Close()
-
-	// Check status
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	// Print response
-	//logResult(resp, reqBody)
-
-	return
-}
-
-func logResult(resp *http.Response, reqBody string) {
+func logSuccess(resp *http.Response, reqBody string) {
 	buf, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		//logrus.Errorf("\"%s\" >> Could not convert io.ReadCloser response to string >> %v", reqBody, err)
+		logrus.Errorf("\"%s\" >> Could not convert io.ReadCloser response to string >> %v", reqBody, err)
 		return
 	}
 	logrus.Infof("[SUCCESS] \"%s\" >> \"%s\" ", reqBody, buf)
-}
-
-func aParallelCall(reqBody string, wg *sync.WaitGroup, counter *int) {
-	aCall(reqBody, URL)
-	*counter = *counter + 1
-	wg.Done()
 }
